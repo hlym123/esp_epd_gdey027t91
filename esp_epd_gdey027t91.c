@@ -203,6 +203,7 @@ esp_err_t panel_gdey027t91_draw_bitmap_full(esp_lcd_panel_t *panel, int x_start,
     uint8_t *mono_buffer = gdey027t91_prepare_mono_buffer(color_data, width, height, 0x7F);
     esp_lcd_panel_io_tx_color(gdey027t91->io, 0x24, mono_buffer, ((width + 7) / 8) * height);
     esp_err_t ret = gdey027t91_trigger_refresh(gdey027t91, 0xF7);  // 全刷
+    g_refresh_code = 0xF7; 
     free(mono_buffer);
 
     return ret;
