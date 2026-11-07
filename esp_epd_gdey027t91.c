@@ -44,8 +44,10 @@ static esp_err_t panel_gdey027t91_draw_bitmap(esp_lcd_panel_t *panel, int x_star
                                               const void *color_data);
 static void convert_8bit_to_1bit(const uint8_t *gray_buffer, uint8_t *mono_buffer, uint16_t width, uint16_t height,
                                  uint8_t threshold);
+static void convert_rgb565_to_1bit(const uint16_t *rgb565_buffer, uint8_t *mono_buffer, uint16_t width, uint16_t height,
+                                   uint8_t threshold);
 static void gdey027t91_set_window(gdey027t91_panel_t *panel, int x_start, int y_start, int x_end, int y_end);
-static uint8_t *gdey027t91_prepare_mono_buffer(const uint8_t *color_data, int width, int height, uint8_t threshold);
+static uint8_t *gdey027t91_prepare_mono_buffer_rgb565(const uint16_t *color_data, int width, int height, uint8_t threshold);
 static esp_err_t gdey027t91_trigger_refresh(gdey027t91_panel_t *panel, uint8_t mode);
 
 esp_err_t esp_lcd_new_panel_gdey027t91(const esp_lcd_panel_io_handle_t io,
@@ -154,16 +156,9 @@ void panel_gdey027t91_refresh_code(uint8_t code)
 }
 
 /**
- * 绘制灰度图像(局刷)
+ * 绘制图像(局刷)
  *
- * 图像数据应为 8bpp 灰度格式（每字节一个像素，0=白，255=黑）。
- *
- * @param panel  指向 epd_panel_t 类型的面板控制结构体
- * @param x_start 起始 X 坐标（像素）
- * @param y_start 起始 Y 坐标（像素）
- * @param x_end   结束 X 坐标（像素）
- * @param y_end   结束 Y 坐标（像素）
- * @param color_bitmap 指向图像数据的指针（灰度，大小为 (x_end - x_start) * (y_end - y_start) 字节）
+ * 输入图像数据为 RGB565（每像素2字节），内部转换为 1bpp 单色后写入 EPD。
  */
 static esp_err_t panel_gdey027t91_draw_bitmap(esp_lcd_panel_t *panel, int x_start, int y_start, int x_end, int y_end, const void *color_data)
 {
@@ -173,7 +168,8 @@ static esp_err_t panel_gdey027t91_draw_bitmap(esp_lcd_panel_t *panel, int x_star
     // 图像数据转换并发送
     int width = x_end - x_start;
     int height = y_end - y_start;
-    uint8_t *mono_buffer = gdey027t91_prepare_mono_buffer(color_data, width, height, 0x7F);
+    const uint16_t *rgb565 = (const uint16_t *)color_data;
+    uint8_t *mono_buffer = gdey027t91_prepare_mono_buffer_rgb565(rgb565, width, height, 0x7F);
     esp_lcd_panel_io_tx_color(gdey027t91->io, 0x24, mono_buffer, ((width + 7) / 8) * height);
     esp_err_t ret = gdey027t91_trigger_refresh(gdey027t91, g_refresh_code);
     g_refresh_code = 0xFC; // 刷新（局刷模式）
@@ -182,16 +178,9 @@ static esp_err_t panel_gdey027t91_draw_bitmap(esp_lcd_panel_t *panel, int x_star
 }
 
 /**
- * 绘制灰度图像(全刷)
+ * 绘制图像(全刷)
  *
- * 图像数据应为 8bpp 灰度格式（每字节一个像素，0=白，255=黑）。
- *
- * @param panel  指向 epd_panel_t 类型的面板控制结构体
- * @param x_start 起始 X 坐标（像素）
- * @param y_start 起始 Y 坐标（像素）
- * @param x_end   结束 X 坐标（像素）
- * @param y_end   结束 Y 坐标（像素）
- * @param color_bitmap 指向图像数据的指针（灰度，大小为 (x_end - x_start) * (y_end - y_start) 字节）
+ * 输入图像数据为 RGB565（每像素2字节），内部转换为 1bpp 单色后写入 EPD。
  */
 esp_err_t panel_gdey027t91_draw_bitmap_full(esp_lcd_panel_t *panel, int x_start, int y_start, int x_end, int y_end, const void *color_data)
 {
@@ -200,7 +189,8 @@ esp_err_t panel_gdey027t91_draw_bitmap_full(esp_lcd_panel_t *panel, int x_start,
 
     int width = x_end - x_start;
     int height = y_end - y_start;
-    uint8_t *mono_buffer = gdey027t91_prepare_mono_buffer(color_data, width, height, 0x7F);
+    const uint16_t *rgb565 = (const uint16_t *)color_data;
+    uint8_t *mono_buffer = gdey027t91_prepare_mono_buffer_rgb565(rgb565, width, height, 0x7F);
     esp_lcd_panel_io_tx_color(gdey027t91->io, 0x24, mono_buffer, ((width + 7) / 8) * height);
     esp_err_t ret = gdey027t91_trigger_refresh(gdey027t91, 0xF7);  // 全刷
     g_refresh_code = 0xF7; 
@@ -263,13 +253,14 @@ static void gdey027t91_set_window(gdey027t91_panel_t *panel, int x_start, int y_
     esp_lcd_panel_io_tx_param(io, 0x4F, (uint8_t[]){(uint8_t)(y_start & 0xFF), (uint8_t)(y_start >> 8)}, 2);
 }
 
-static uint8_t *gdey027t91_prepare_mono_buffer(const uint8_t *color_data, int width, int height, uint8_t threshold)
+static uint8_t *gdey027t91_prepare_mono_buffer_rgb565(const uint16_t *color_data, int width, int height, uint8_t threshold)
 {
     int mono_bytes_per_row = (width + 7) / 8;
     int buffer_size        = mono_bytes_per_row * height;
     uint8_t *buffer        = (uint8_t *)heap_caps_malloc(buffer_size, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
     assert(buffer != NULL);
-    convert_8bit_to_1bit(color_data, buffer, width, height, threshold);
+    memset(buffer, 0, buffer_size);
+    convert_rgb565_to_1bit(color_data, buffer, width, height, threshold);
     return buffer;
 }
 
@@ -279,7 +270,9 @@ static esp_err_t gdey027t91_wait_busy(gdey027t91_panel_t *panel)
         int64_t timeout_us = panel->busy_timeout_ms * 1000;
         int64_t start = esp_timer_get_time();
 
-        while (gpio_get_level(panel->busy_gpio_num)) {
+        // BUSY is typically low (0) when the panel is busy, and high (1) when idle.
+        // Wait while BUSY is asserted (0), and leave when it becomes idle (1).
+        while (gpio_get_level(panel->busy_gpio_num) == 0) {
             if (esp_timer_get_time() - start > timeout_us) {
                 ESP_LOGE(TAG, "Refresh timeout after %dms", panel->busy_timeout_ms);
                 return ESP_ERR_TIMEOUT;
@@ -298,4 +291,34 @@ static esp_err_t gdey027t91_trigger_refresh(gdey027t91_panel_t *panel, uint8_t m
     esp_lcd_panel_io_tx_param(panel->io, 0x22, &mode, 1);
     esp_lcd_panel_io_tx_param(panel->io, 0x20, NULL, 0);
     return gdey027t91_wait_busy(panel);
+}
+
+// 将 RGB565 转换为 1bit 单色
+// 亮度近似：Y = (R*299 + G*587 + B*114) / 1000
+static void convert_rgb565_to_1bit(const uint16_t *rgb565_buffer, uint8_t *mono_buffer, uint16_t width, uint16_t height,
+                                   uint8_t threshold)
+{
+    const uint16_t bytes_per_row = (width + 7) / 8;
+    for (uint16_t y = 0; y < height; ++y) {
+        for (uint16_t x = 0; x < width; ++x) {
+            const uint32_t byte_idx = y * bytes_per_row + (x / 8);
+            const uint8_t bit_pos   = 7 - (x % 8);
+
+            uint16_t p = rgb565_buffer[y * width + x];
+            uint8_t r5 = (p >> 11) & 0x1F;
+            uint8_t g6 = (p >> 5)  & 0x3F;
+            uint8_t b5 =  p        & 0x1F;
+
+            uint8_t r = (r5 << 3) | (r5 >> 2);
+            uint8_t g = (g6 << 2) | (g6 >> 4);
+            uint8_t b = (b5 << 3) | (b5 >> 2);
+
+            uint16_t y_luma = (uint16_t)(((uint32_t)r * 299 + (uint32_t)g * 587 + (uint32_t)b * 114) / 1000);
+            if (y_luma >= threshold) {
+                mono_buffer[byte_idx] |= (1 << bit_pos);
+            } else {
+                // keep 0
+            }
+        }
+    }
 }
